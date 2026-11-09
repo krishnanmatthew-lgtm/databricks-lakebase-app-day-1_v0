@@ -90,6 +90,27 @@
     }
     .delete-btn:hover { background: #fee2e2; border-color: #fca5a5; box-shadow: 0 2px 8px rgba(153, 27, 27, 0.15); }
     .delete-btn:active { transform: translateY(1px); }
+    .news-btn {
+      padding: 6px 12px;
+      border: 1px solid #c7d2fe;
+      border-radius: 8px;
+      background: #eef2ff;
+      color: #3730a3;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .news-btn:hover { background: #e0e7ff; border-color: #a5b4fc; }
+    .news-btn:active { transform: translateY(1px); }
+    .actions-cell { white-space: nowrap; }
+    .news-row td { background: #f8fafc; padding-top: 0; padding-bottom: 0; }
+    .news-list { margin: 0; padding: 14px 8px 14px 28px; }
+    .news-list li { margin-bottom: 8px; font-size: 14px; line-height: 1.45; list-style: disc; }
+    .news-list li:last-child { margin-bottom: 0; }
+    .news-list a { color: #4338ca; text-decoration: none; font-weight: 500; }
+    .news-list a:hover { text-decoration: underline; }
+    .news-meta { color: #64748b; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -149,8 +170,16 @@
           delBtn.textContent = "Remove";
           delBtn.setAttribute("aria-label", "Remove " + row.symbol + " from watchlist");
           delBtn.addEventListener("click", () => removeFromWatchlist(row.symbol));
+          const newsBtn = document.createElement("button");
+          newsBtn.type = "button";
+          newsBtn.className = "news-btn";
+          newsBtn.textContent = "News";
+          newsBtn.setAttribute("aria-label", "Fetch recent news for " + row.symbol);
+          newsBtn.addEventListener("click", () => fetchTickerNews(row.symbol, newsBtn));
           const actionsTd = document.createElement("td");
+          actionsTd.className = "actions-cell";
           actionsTd.appendChild(delBtn);
+          actionsTd.appendChild(newsBtn);
           tr.appendChild(actionsTd);
           watchlistBody.appendChild(tr);
         });
@@ -177,6 +206,73 @@
         resultEl.className = "success";
         resultEl.textContent = "Removed " + symbol + " from watchlist.";
         loadWatchlist();
+      } catch (err) {
+        resultEl.className = "error";
+        resultEl.textContent = "Request failed: " + err;
+      }
+    }
+
+    async function fetchTickerNews(symbol, btn) {
+      const row = btn.closest("tr");
+      const existing = row.nextElementSibling;
+      if (existing && existing.classList.contains("news-row")) {
+        existing.remove();
+        return;
+      }
+
+      resultEl.className = "";
+      resultEl.textContent = "Fetching news for " + symbol + "...";
+
+      try {
+        const resp = await fetch("/watchlist/" + encodeURIComponent(symbol) + "/news", {
+          method: "POST",
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          resultEl.className = "error";
+          resultEl.textContent = "Error: " + (data.error || resp.statusText);
+          return;
+        }
+        resultEl.className = "success";
+        resultEl.textContent = "Fetched " + data.count + " news item" + (data.count === 1 ? "" : "s") + " for " + symbol + ".";
+
+        const newsTr = document.createElement("tr");
+        newsTr.className = "news-row";
+        const td = document.createElement("td");
+        td.colSpan = 5;
+
+        const items = data.news || [];
+        if (items.length === 0) {
+          td.textContent = "No recent news for " + symbol + ".";
+        } else {
+          const list = document.createElement("ul");
+          list.className = "news-list";
+          items.forEach((item) => {
+            const li = document.createElement("li");
+            const link = document.createElement("a");
+            link.href = item.article_url || "#";
+            link.target = "_blank";
+            link.rel = "noopener";
+            link.textContent = item.title || "Untitled";
+            li.appendChild(link);
+            const meta = document.createElement("span");
+            meta.className = "news-meta";
+            const published = item.published_utc
+              ? new Date(item.published_utc).toLocaleString()
+              : "";
+            const publisher = item.publisher && item.publisher.name ? item.publisher.name : "";
+            const parts = [publisher, published].filter(Boolean).join(" — ");
+            if (parts) {
+              meta.textContent = " (" + parts + ")";
+              li.appendChild(meta);
+            }
+            list.appendChild(li);
+          });
+          td.appendChild(list);
+        }
+
+        newsTr.appendChild(td);
+        row.after(newsTr);
       } catch (err) {
         resultEl.className = "error";
         resultEl.textContent = "Request failed: " + err;

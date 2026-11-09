@@ -28,6 +28,7 @@ _w = WorkspaceClient()
 
 TABLE_NAME = os.environ.get("MASSIVE_TABLE_NAME", "massive_records")
 WATCHLIST_TABLE_NAME = os.environ.get("WATCHLIST_TABLE_NAME", "watchlist")
+NEWS_TABLE_NAME = os.environ.get("TICKER_NEWS_TABLE_NAME", "ticker_news")
 
 # Basic stock ticker shape check: 1-10 uppercase letters, with an optional
 # ".X" or ".XX" share-class suffix (e.g. "BRK.B"). This rejects obviously
@@ -58,6 +59,20 @@ def ensure_watchlist_table():
             latest_price NUMERIC,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
             PRIMARY KEY (symbol, email)
+        )
+        """
+    )
+
+
+def ensure_news_table():
+    """Create the ticker news table in Lakebase if it doesn't exist yet."""
+    lakebase.run_write(
+        f"""
+        CREATE TABLE IF NOT EXISTS {NEWS_TABLE_NAME} (
+            id TEXT PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            payload JSONB NOT NULL,
+            fetched_at TIMESTAMPTZ NOT NULL DEFAULT now()
         )
         """
     )
@@ -215,6 +230,57 @@ def delete_from_watchlist(symbol):
     )
 
     return jsonify({"deleted": symbol})
+
+
+@app.route("/watchlist/<symbol>/news", methods=["POST"])
+def fetch_ticker_news(symbol):
+    """Fetch recent news for one ticker from Massive in a SINGLE API call,
+    upsert the items into Lakebase, and return them for display."""
+    symbol = symbol.strip().upper()
+
+    if not symbol or not _TICKER_RE.match(symbol):
+        return jsonify({"error": f"Invalid ticker symbol: {symbol!r}"}), 400
+
+    ensure_news_table()
+    client = MassiveClient()
+    try:
+        data = client.get_ticker_news(symbol, limit=5)  # single API call
+    except requests.HTTPError:
+        return jsonify({"error": f"Failed to fetch news for ticker: {symbol}"}), 400
+
+    items = data.get("results", []) if isinstance(data, dict) else []
+    stored = _upsert_news_batch(symbol, items)
+
+    return jsonify({"symbol": symbol, "count": stored, "news": items})
+
+
+def _upsert_news_batch(symbol: str, items: list[dict]) -> int:
+    """Upsert news items into the ticker news table, one statement per row."""
+    import json as _json
+
+    count = 0
+    with lakebase.get_connection() as conn:
+        with conn.cursor() as cur:
+            for item in items:
+                # Massive news items carry a unique id; fall back to a stable
+                # composite key if the feed ever omits it.
+                item_id = str(
+                    item.get("id")
+                    or f"{symbol}:{item.get('published_utc', '')}:{item.get('title', '')[:64]}"
+                )
+                cur.execute(
+                    f"""
+                    INSERT INTO {NEWS_TABLE_NAME} (id, symbol, payload, fetched_at)
+                    VALUES (%s, %s, %s, now())
+                    ON CONFLICT (id) DO UPDATE
+                        SET payload = EXCLUDED.payload,
+                            fetched_at = EXCLUDED.fetched_at
+                    """,
+                    (item_id, symbol, _json.dumps(item)),
+                )
+                count += 1
+            conn.commit()
+    return count
 
 
 def _extract_latest_price(data: dict) -> float | None:
